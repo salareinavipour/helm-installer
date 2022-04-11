@@ -1,0 +1,102 @@
+---
+- name: Deploy simple ruby server to Minikube
+  hosts: localhost
+  gather_facts: False
+  connection: local
+
+  collections:
+    - kubernetes.core
+
+  vars:
+
+    ansible_python_interpreter: '{{ ansible_playbook_python }}'
+    image_name: ruby_server
+    image_tag: v0.1.0
+    namespace: ruby-server
+
+  pre_tasks:
+
+    - name: check the status of minikube.
+      command: minikube status
+      register: minikube_status
+      changed_when: false
+      ignore_errors: true
+
+    - name: start minikube if it's not running.
+      command: minikube start --vm-driver=docker
+      when: "not minikube_status.stdout or 'Running' not in minikube_status.stdout"
+    
+    - name: Add an Apt signing key, uses whichever key is at the URL
+      ansible.builtin.apt_key:
+        url: https://baltocdn.com/helm/signing.asc
+        state: present
+      become: yes
+    
+    - name: Install apt-transport-https
+      apt:
+        name: apt-transport-https
+        state: present
+      become: yes
+    
+    - name: Add helm repository into sources list
+      ansible.builtin.apt_repository:
+        repo: deb https://baltocdn.com/helm/stable/debian/ all main
+        state: present
+      become: yes
+    
+    - name: Update repositories cache and install "helm" package
+      apt:
+        name: helm
+        update_cache: yes
+      become: yes
+    
+    - name: Clone "http_server" to build the image
+      ansible.builtin.git:
+        repo: 'https://github.com/salareinavipour/http_server.git'
+        dest: /opt/http_server
+        force: yes
+      become: yes
+    
+    - name: get existing image hash.
+      shell: |
+        eval $(minikube docker-env)
+        docker images -q {{ image_name }}
+      register: image_hash
+      changed_when: false
+
+    - name: Build an image and push it to the local repo
+      community.docker.docker_image:
+        build:
+          path: /opt/http_server
+          network: host
+        name: "{{ image_name }}"
+        tag: "{{ image_tag }}"
+        source: build
+      when: not image_hash.stdout
+
+    - name: Load the image to minikube
+      shell: | 
+         minikube image load {{ image_name }}:{{ image_tag }}
+      when: not image_hash.stdout
+
+
+  tasks:
+
+    - name: Clone ruby-server helm chart to build the image
+      ansible.builtin.git:
+        repo: 'https://github.com/salareinavipour/ruby-server-helm-chart.git'
+        dest: /opt/http_server_chart
+        force: yes
+      become: yes
+
+    - name: Deploy chart from local path
+      kubernetes.core.helm:
+        name: ruby-server
+        chart_ref: /opt/http_server_chart
+        release_namespace: "{{ namespace }}"
+        create_namespace: true
+
+  post_tasks:
+
+    - debug:
+        msg: "Now you should see the app is running in http://simple-ruby.local"
